@@ -1,0 +1,286 @@
+#!/usr/bin/env perl
+use Mojo::Base -strict;
+use Mojo::ByteStream 'b';
+use Mojo::Collection 'c';
+use Mojo::File 'path';
+use Mojo::Util 'dumper';
+use Mojo::IOLoop;
+use Mojo::IOLoop::Delay;
+
+#
+# check_cisco_ssh_user_login - Check Cisco SSH Login (async
+# / non blocking using Mojolicious, EV and Net::OpenSSH async=>1)
+# plugin: -epn
+#
+# Copyright (C) 2019 Franz Skale <franz.skale@citycom-austria.com>
+#
+# WCIT
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+
+our $VERSION = "1.0";
+my $PROGNAME = path($0)->basename;
+
+BEGIN {
+
+  #Windows is untested (feel free to do so and report back)
+  die(sprintf("Windows OS not supported !\n")) if $^O =~ /Win/;
+
+  my $modules = {
+    q{Monitoring::Plugin} => {minver => q{0.40}},
+    q{IO::Pty}            => {minver => q{1.12}},
+    q{Net::OpenSSH}       => {minver => q{0.78}},
+    Mojolicious           => {minver => q{8.13}}
+  };
+
+  my $ev = q{use EV 4.25};
+  #EV tested on recent osx(openbsd), linux and freebsd.
+  if ($^O =~ qr/(?:linux|darwin|freebsd|openbsd)/i) {
+    eval $ev;
+    die(sprintf(
+      "Please install module EV version %s or higher !\nError:%s\n",
+      q{4.25}, $@
+    ))
+      if $@;
+  }
+
+  #Mojolicious and other modules should work with most IX OS !
+  foreach my $module (keys %{$modules}) {
+    my $minver = $modules->{$module}->{minver};
+    eval qq{use $module $minver};
+    die(sprintf(
+      "Please install module %s version %s or higher !\nError:%s\n",
+      $module, $minver, $@
+    ))
+      if $@;
+  }
+}
+
+my $np = Monitoring::Plugin->new(
+  usage =>
+    "Usage: %s [ -V|--version ] [-H|--hostname <host>] [-U|--username <Username>] [-P|--password <password>] [-p|--port <tcp port>] [-t|--timeout <timeout>]",
+  version => $VERSION,
+);
+
+$np->add_arg(
+  spec     => 'timeout=i',
+  help     => "--timeout\n   Timeout value in seconds",
+  required => 0,
+);
+
+$np->add_arg(
+  spec     => 'hostname|H=s',
+  help     => "--host\n   IP address of host",
+  required => 1,
+);
+
+$np->add_arg(
+  spec     => 'username|U=s',
+  help     => "--username\n   Username",
+  required => 1,
+);
+
+$np->add_arg(
+  spec     => 'password|P=s',
+  help     => "--password\n   Password",
+  required => 1,
+);
+
+$np->add_arg(
+  spec     => 'port|p=i',
+  help     => "--port\n   TCP port (defaults to 22)",
+  required => 0,
+);
+
+$np->getopts;
+
+my ($host, $user, $pass, $port, $timeout, $verbose) = (
+  $np->opts->hostname, $np->opts->username,
+  $np->opts->password, $np->opts->port // 22,
+  $np->opts->timeout // 10, $np->opts->verbose // 0
+);
+
+if ($verbose) {
+  $Net::OpenSSH::debug |= 80;
+}
+
+# be sure to configure a user with privileges to allow the command !
+my $cmd = q{show users};
+my $fh  = undef;
+$fh = path(q{/dev/null})->open('>>') if !$verbose;
+
+my $options = {
+  host              => $host,
+  user              => $user,
+  password          => $pass,
+  default_stdout_fh => $fh,
+  default_stderr_fh => $fh,
+  master_stderr_fh  => $fh,
+  master_stdout_fh  => $fh,
+  async             => 1,
+  port              => $port,
+  ctl_dir           => q{/tmp},
+  master_opts       => [
+    -o => "UserKnownHostsFile=/dev/null",
+    -o => "StrictHostKeyChecking=no",
+    -o => qq{ConnectTimeout=$timeout}
+  ],
+  timeout => $timeout
+};
+
+#Timeout on async's not working. Define an ALARM signal handler though.
+local $SIG{ALRM} = sub {
+  Mojo::IOLoop->stop;
+  $np->plugin_exit(CRITICAL,
+    sprintf(
+      "Error: Timeout (%ds) connecting to host: %s User: %s Port: %d",
+      $timeout, $host, $user, $port
+    )
+  );
+};
+
+#set alarm handler timeout
+alarm $timeout;
+
+#ssh must be global to not lose scope !
+my $ssh;
+#create the Delay Loop. (Non-Blocking)
+my $d = Mojo::IOLoop::Delay->new;
+
+$d->steps(
+  sub {
+    my $delay = shift;
+    printf(STDERR "STEP1: Creating Openssh Async Object with options:\n%s",
+      dumper $options)
+      if $verbose;
+    Mojo::IOLoop->timer(0.1 => $delay->begin);
+    $ssh = Net::OpenSSH->new(%{$options}) or do {
+      $np->plugin_exit(CRITICAL,
+        sprintf(
+          "Error: %s Host: %s",
+          $ssh->error ? $ssh->error : q{unknown error}, $host
+        )
+      );
+    };
+  },
+  sub {
+    my $delay = shift;
+
+    printf(STDERR "STEP2: Connection to host: %s established !\n", $host)
+      if $verbose;
+
+    # Perform operation every 0.05 seconds until wait_for_master returns true !
+    my $cb = $delay->begin;
+    my $id;
+    $id = Mojo::IOLoop->recurring(
+      0.5 => sub {
+        my $loop = shift;
+        if ($ssh->wait_for_master(1)) {
+          printf(STDERR "STEP2: Waiting for master (async callback)\n")
+            if $verbose;
+
+          # the connection has been established!
+          # remote commands can be run now !
+          $cb->();
+          $loop->remove($id);
+        }
+        elsif ($ssh->error) {
+
+          # connection can not be established
+          printf(STDERR "Error on connection\n") if $verbose;
+          $np->plugin_exit(CRITICAL,
+            sprintf(
+              "Error: %s Host: %s",
+              $ssh->error ? $ssh->error : q{unknown error}, $host
+            )
+          );
+          $cb->();
+        }
+      }
+    );
+  },
+  sub {
+    my $delay = shift;
+    my $cb    = $delay->begin;
+    my $c     = c();
+    printf(STDERR "STEP3: building commandline\n") if $verbose;
+    if (defined(my @cmd = $ssh->make_remote_command(show => 'user'))) {
+      printf(STDERR "STEP3: Run command in delay loop:\n%s\n", join(' ', @cmd))
+        if $verbose;
+      my ($in, $out, $err, $pid) = $ssh->open3('show user');
+      printf(STDERR "STEP3: Receiving\n") if $verbose;
+      while (<$out>) {
+        printf(STDERR "%s", $_) if $verbose;
+        push(@{$c}, $_);
+        if (eof($out)) {
+          $delay->pass($c);
+          $cb->();
+        }
+      }
+    }
+    else {
+      $np->plugin_exit(CRITICAL,
+        sprintf(
+          "Error: Cannot create command: %s Host: %s",
+          $cmd ? $cmd : q{unknown command}, $host
+        )
+      );
+      $cb->();
+    }
+  },
+  sub {
+    my ($delay, $c) = @_;
+    printf(STDERR "STEP4: Done. Disconnecting host: %s\n", $host) if $verbose;
+    $ssh->disconnect(1);
+    my $cb = $delay->begin;
+    my $id;
+    $id = Mojo::IOLoop->recurring(
+      0.5 => sub {
+        my $loop = shift;
+        my $res  = $ssh->wait_for_master(1);
+        if (defined $res && !$res) {
+          printf(STDERR "STEP4: Disconnecting (async callback)\n") if $verbose;
+          undef $ssh;
+          $loop->remove($id);
+          ref $c eq 'Mojo::Collection'
+            and $c->size ? $delay->pass($c) : $delay->pass(undef);
+          $cb->();
+        }
+      }
+    );
+  },
+  sub {
+    my ($delay, $c) = @_;
+    if (ref $c eq 'Mojo::Collection' and $c->size) {
+      printf(STDERR "STEP5 analyzing returned output. Got:\n%s\n",
+        $c->compact->join("\n")->trim
+      ) if $verbose;
+      $c->grep(qr{$user})->size
+        ? $np->plugin_exit(OK,
+        sprintf("Found username %s on host %s", $user, $host))
+        : $np->plugin_exit(CRITICAL,
+        sprintf("Username %s on host %s cannot be found !!!", $user, $host));
+    }
+    else {
+      $np->plugin_exit(CRITICAL,
+        sprintf(
+          "Didn't get any output to analyze from host: %s user: %s !!! Command: %s allowed ?",
+          $host, $user, $cmd
+        )
+      );
+    }
+  }
+)->wait;
+Mojo::IOLoop->start unless Mojo::IOLoop->is_running;
