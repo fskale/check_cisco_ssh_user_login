@@ -20,16 +20,29 @@ check_cisco_ssh_user [ -V|--version ] [-H|--hostname <host>]
 [-p|--port <tcp port>] [-t|--timeout <timeout>]
 
 `` -?, --usage | Print usage information ``
+
 `` -h, --help | Print detailed help screen ``
+
 ``-V, --version | Print version information ``
+
  ``--host, -H | IP address or hostname of cisco device ``
+ 
  ``--username, -U | username``
+ 
  ``--password, -P | password ``
+ 
  ``--port, -p | tcp port to use (optional)``
+ 
  ``-t, --timeout=INTEGER |Seconds before plugin times out (default: 10) ``
  
-  **This plugin was not tested on Windows. Feel free to do so  and report back !**
+ ``-v, --verbose | prints extensive debugging info to stderr ``
+ 
+  **This plugin was not tested on Windows.**
+  
+  **Feel free to do so  and report back !**
+  
   **At least use perl version 5.20 !**
+  
   **The user must have the privilege to issue the command 'show users'**
 
   ## Prerequisites (Linux and other derivates):
@@ -42,7 +55,6 @@ check_cisco_ssh_user [ -V|--version ] [-H|--hostname <host>]
   `cpan Mojolicous EV IO::Tty Net::OpenSSH Monitoring::Plugin`
   ### Using cpanm:
   `cpanm Mojolicous EV IO::Tty Net::OpenSSH Monitoring::Plugin`
-  
   ### Example output
   ```CISCO_SSH_USER_LOGIN OK - Found username autobackup on host 192.168.1.1```
   #### Timeout error 
