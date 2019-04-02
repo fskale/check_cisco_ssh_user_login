@@ -30,12 +30,15 @@ check_cisco_ssh_user [ -V|--version ] [-H|--hostname <host>]
  ``--username, -U | username``
  
  ``--password, -P | password ``
+
+ ``--identiy, -I | private key file (mutually exclusive with password auth !)``
  
  ``--port, -p | tcp port to use (optional)``
  
  ``-t, --timeout=INTEGER |Seconds before plugin times out (default: 10) ``
  
  ``-v, --verbose | prints extensive debugging info to stderr ``
+
  
   **This plugin was not tested on Windows.**
   
@@ -44,6 +47,7 @@ check_cisco_ssh_user [ -V|--version ] [-H|--hostname <host>]
   **At least use perl version 5.20 !**
   
   **The user must have the privilege to issue the command 'show users'**
+
 
   ## Prerequisites (Linux and other derivates):
   ### Debian (Build essentials) needed for EV and IO::Tty
