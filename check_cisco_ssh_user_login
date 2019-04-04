@@ -120,7 +120,6 @@ if ($verbose) {
 }
 
 # be sure to configure a user with privileges to allow the command !
-my $cmd = q{show users};
 my $fh  = undef;
 $fh = path(q{/dev/null})->open('>>') if !$verbose;
 
@@ -138,7 +137,7 @@ my $options = {
 	master_opts       => [
 		-o => "UserKnownHostsFile=/dev/null",
 		-o => "StrictHostKeyChecking=no",
-		-o => qq{IdentityFile=$ident},
+		-o => $ident ? qq{IdentityFile=$ident} : qq{IdentityFile=/nonexistent},
 		-o => qq{ConnectTimeout=$timeout}
 	],
 	timeout => $timeout
@@ -175,6 +174,8 @@ if ($ident) {
 
 #ssh must be global to not lose scope !
 my $ssh;
+#command to issue after building commandline
+my $command = q{show users};
 
 #create the Delay Loop. (Non-Blocking)
 my $d = Mojo::IOLoop::Delay->new;
@@ -227,10 +228,10 @@ $d->steps(
 		my $cb    = $delay->begin;
 		my $c     = c();
 		printf( STDERR "STEP3: building commandline\n" ) if $verbose;
-		if ( defined( my @cmd = $ssh->make_remote_command( show => 'user' ) ) ) {
+		if ( defined( my @cmd = $ssh->make_remote_command( show => 'users' ) ) ) {
 			printf( STDERR "STEP3: Run command in delay loop:\n%s\n", join( ' ', @cmd ) )
 				if $verbose;
-			my ( $in, $out, $err, $pid ) = $ssh->open3($cmd);
+			my ( $in, $out, $err, $pid ) = $ssh->open3($command);
 			printf( STDERR "STEP3: Receiving\n" ) if $verbose;
 			while (<$out>) {
 				printf( STDERR "%s", $_ ) if $verbose;
@@ -243,7 +244,7 @@ $d->steps(
 		}
 		else {
 			$np->plugin_exit( CRITICAL,
-				sprintf( "Error: Cannot create command: %s Host: %s", $cmd ? $cmd : q{unknown command}, $host ) );
+				sprintf( "Error: Cannot create command: %s Host: %s", $command ? $command: q{unknown command}, $host ) );
 			$cb->();
 		}
 	},
@@ -280,7 +281,7 @@ $d->steps(
 			$np->plugin_exit( CRITICAL,
 				sprintf(
 					"Didn't get any output to analyze from host: %s user: %s !!! Command: %s allowed ?",
-					$host, $user, $cmd
+					$host, $user, $command
 				)
 			);
 		}
